@@ -38,6 +38,95 @@ let sessionStats = {
     requestHistory: [],
 };
 
+// Persistent daily statistics (stored in localStorage)
+const DAILY_STATS_KEY = 'cache_monitor_daily_stats';
+
+/**
+ * Get today's date string in local time (YYYY-MM-DD)
+ */
+function getTodayKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Load daily stats from localStorage
+ */
+function loadDailyStats() {
+    try {
+        const stored = localStorage.getItem(DAILY_STATS_KEY);
+        return stored ? JSON.parse(stored) : {};
+    } catch (e) {
+        log('Error loading daily stats:', e);
+        return {};
+    }
+}
+
+/**
+ * Save daily stats to localStorage
+ */
+function saveDailyStats(stats) {
+    try {
+        localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(stats));
+    } catch (e) {
+        log('Error saving daily stats:', e);
+    }
+}
+
+/**
+ * Get or create today's stats entry
+ */
+function getTodayStats() {
+    const allStats = loadDailyStats();
+    const today = getTodayKey();
+    if (!allStats[today]) {
+        allStats[today] = {
+            date: today,
+            requests: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalCost: 0,
+            savings: 0,
+        };
+        saveDailyStats(allStats);
+    }
+    return allStats[today];
+}
+
+/**
+ * Update today's stats with a new request
+ */
+function updateDailyStats(usage, costs) {
+    const allStats = loadDailyStats();
+    const today = getTodayKey();
+
+    if (!allStats[today]) {
+        allStats[today] = {
+            date: today,
+            requests: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalCost: 0,
+            savings: 0,
+        };
+    }
+
+    allStats[today].requests++;
+    allStats[today].inputTokens += usage.input_tokens || 0;
+    allStats[today].outputTokens += usage.output_tokens || 0;
+    allStats[today].cacheReadTokens += usage.cache_read_input_tokens || 0;
+    allStats[today].cacheWriteTokens += usage.cache_creation_input_tokens || 0;
+    allStats[today].totalCost += costs?.totalCost || 0;
+    allStats[today].savings += costs?.savings || 0;
+
+    saveDailyStats(allStats);
+    return allStats[today];
+}
+
 // Current request tracking
 let currentRequest = {
     active: false,
@@ -362,6 +451,9 @@ function processUsageData(usage) {
         messageCount: currentRequest.messages?.length || 0,
     });
 
+    // Update persistent daily stats
+    updateDailyStats(usage, costs);
+
     // Store current request as previous for next comparison
     if (currentRequest.messages) {
         previousRequest = {
@@ -468,6 +560,15 @@ function formatCost(cost) {
 }
 
 /**
+ * Format a date key as a readable date
+ */
+function formatDateKey(dateKey) {
+    const [year, month, day] = dateKey.split('-');
+    const date = new Date(year, month - 1, day);
+    return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/**
  * Show the history modal
  */
 function showHistoryModal() {
@@ -475,40 +576,80 @@ function showHistoryModal() {
     const existing = document.getElementById('cache_history_modal');
     if (existing) existing.remove();
 
+    // Get daily stats
+    const allDailyStats = loadDailyStats();
+    const today = getTodayKey();
+    const todayStats = allDailyStats[today] || { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, savings: 0 };
+
+    // Get sorted days (most recent first)
+    const sortedDays = Object.keys(allDailyStats).sort().reverse();
+
+    // Build daily stats HTML
+    let dailyStatsHtml = '';
+    if (sortedDays.length > 0) {
+        dailyStatsHtml = `
+            <div class="daily_stats_section">
+                <h4>Daily Statistics</h4>
+                <div class="daily_stats_grid">
+                    ${sortedDays.slice(0, 7).map(day => {
+                        const s = allDailyStats[day];
+                        const isToday = day === today;
+                        return `
+                            <div class="daily_stat_card ${isToday ? 'today' : ''}">
+                                <div class="daily_stat_date">${isToday ? 'Today' : formatDateKey(day)}</div>
+                                <div class="daily_stat_row"><span>Requests:</span> <b>${s.requests}</b></div>
+                                <div class="daily_stat_row"><span>Input:</span> <b>${(s.inputTokens || 0).toLocaleString()}</b></div>
+                                <div class="daily_stat_row"><span>Output:</span> <b>${(s.outputTokens || 0).toLocaleString()}</b></div>
+                                <div class="daily_stat_row"><span>Cache Read:</span> <b class="good">${(s.cacheReadTokens || 0).toLocaleString()}</b></div>
+                                <div class="daily_stat_row"><span>Cache Write:</span> <b class="neutral">${(s.cacheWriteTokens || 0).toLocaleString()}</b></div>
+                                <div class="daily_stat_row"><span>Cost:</span> <b>${formatCost(s.totalCost || 0)}</b></div>
+                                <div class="daily_stat_row"><span>Savings:</span> <b class="good">${formatCost(s.savings || 0)}</b></div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    }
+
     const modal = document.createElement('div');
     modal.id = 'cache_history_modal';
     modal.innerHTML = `
         <div class="cache_modal_backdrop"></div>
         <div class="cache_modal_content">
             <div class="cache_modal_header">
-                <h3>Request History</h3>
+                <h3>Cache Monitor History</h3>
                 <button class="cache_modal_close">&times;</button>
             </div>
             <div class="cache_modal_body">
-                <table class="cache_history_table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Model</th>
-                            <th>Msgs</th>
-                            <th>Input</th>
-                            <th>Cache Read</th>
-                            <th>Cache Write</th>
-                            <th>Status</th>
-                            <th>Cost</th>
-                            <th>Analysis</th>
-                        </tr>
-                    </thead>
-                    <tbody id="cache_history_tbody">
-                    </tbody>
-                </table>
-                ${sessionStats.requestHistory.length === 0 ? '<p style="text-align: center; opacity: 0.7; margin-top: 20px;">No requests recorded yet</p>' : ''}
+                ${dailyStatsHtml}
+                <div class="session_history_section">
+                    <h4>Session Requests</h4>
+                    <table class="cache_history_table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Model</th>
+                                <th>Msgs</th>
+                                <th>Input</th>
+                                <th>Cache Read</th>
+                                <th>Cache Write</th>
+                                <th>Status</th>
+                                <th>Cost</th>
+                                <th>Analysis</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cache_history_tbody">
+                        </tbody>
+                    </table>
+                    ${sessionStats.requestHistory.length === 0 ? '<p style="text-align: center; opacity: 0.7; margin-top: 20px;">No requests recorded this session</p>' : ''}
+                </div>
             </div>
             <div class="cache_modal_footer">
                 <div class="cache_modal_summary">
-                    <span>Total Requests: <b>${sessionStats.totalRequests}</b></span>
-                    <span>Total Cost: <b>${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.totalCost || 0), 0))}</b></span>
-                    <span>Total Savings: <b class="good">${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.savings || 0), 0))}</b></span>
+                    <span>Session Requests: <b>${sessionStats.totalRequests}</b></span>
+                    <span>Session Cost: <b>${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.totalCost || 0), 0))}</b></span>
+                    <span>Session Savings: <b class="good">${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.savings || 0), 0))}</b></span>
                 </div>
             </div>
         </div>

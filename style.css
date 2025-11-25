@@ -479,3 +479,69 @@
 .bad {
     color: #f87171 !important;
 }
+
+/* Daily Stats Section */
+.daily_stats_section {
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.daily_stats_section h4 {
+    margin: 0 0 12px 0;
+    color: var(--SmartThemeBodyColor, #fff);
+    font-size: 14px;
+}
+
+.daily_stats_grid {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 5px;
+}
+
+.daily_stat_card {
+    flex: 0 0 auto;
+    min-width: 140px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    padding: 12px;
+    border: 1px solid var(--SmartThemeBorderColor, #333);
+}
+
+.daily_stat_card.today {
+    border-color: #4ade80;
+    background: rgba(74, 222, 128, 0.1);
+}
+
+.daily_stat_date {
+    font-weight: bold;
+    color: var(--SmartThemeBodyColor, #fff);
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.daily_stat_card.today .daily_stat_date {
+    color: #4ade80;
+}
+
+.daily_stat_row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    padding: 2px 0;
+    color: var(--SmartThemeBodyColor, #aaa);
+}
+
+.daily_stat_row b {
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.session_history_section {
+    padding: 15px 20px 0 20px;
+}
+
+.session_history_section h4 {
+    margin: 0 0 12px 0;
+    color: var(--SmartThemeBodyColor, #fff);
+    font-size: 14px;
+}
