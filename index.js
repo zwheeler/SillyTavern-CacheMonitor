@@ -178,17 +178,19 @@ function processUsageData(usage) {
         sessionStats.consecutiveMisses++;
     }
 
-    // Store in history
+    // Store in history with cost calculation
     const responseTime = currentRequest.startTime ? Date.now() - currentRequest.startTime : 0;
+    const costs = calculateCosts(usage);
     sessionStats.requestHistory.push({
         timestamp: Date.now(),
         responseTimeMs: responseTime,
         usage: { ...usage },
         cacheHit: hadCacheRead,
         cacheWrite: hadCacheWrite,
+        costs,
     });
 
-    if (sessionStats.requestHistory.length > 50) {
+    if (sessionStats.requestHistory.length > 100) {
         sessionStats.requestHistory.shift();
     }
 
@@ -206,6 +208,172 @@ function processUsageData(usage) {
     updatePanel();
 
     log('Usage processed:', usage);
+}
+
+/**
+ * Calculate costs for a request based on Claude pricing
+ * Prices per 1M tokens (Sonnet 4.5): Input $3, Output $15, Cache Write $3.75, Cache Read $0.30
+ */
+function calculateCosts(usage) {
+    const model = usage.model || '';
+
+    // Default to Sonnet pricing, adjust for other models
+    let inputPrice = 3.0;    // per 1M tokens
+    let outputPrice = 15.0;
+    let cacheWritePrice = 3.75;  // 25% more than input
+    let cacheReadPrice = 0.30;   // 90% less than input
+
+    if (/opus/i.test(model)) {
+        inputPrice = 15.0;
+        outputPrice = 75.0;
+        cacheWritePrice = 18.75;
+        cacheReadPrice = 1.50;
+    } else if (/haiku/i.test(model)) {
+        inputPrice = 0.80;
+        outputPrice = 4.0;
+        cacheWritePrice = 1.0;
+        cacheReadPrice = 0.08;
+    }
+
+    const inputTokens = usage.input_tokens || 0;
+    const outputTokens = usage.output_tokens || 0;
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    const cacheWrite = usage.cache_creation_input_tokens || 0;
+
+    // Non-cached input tokens = total input - cache read
+    const nonCachedInput = Math.max(0, inputTokens - cacheRead);
+
+    const inputCost = (nonCachedInput / 1_000_000) * inputPrice;
+    const outputCost = (outputTokens / 1_000_000) * outputPrice;
+    const cacheWriteCost = (cacheWrite / 1_000_000) * cacheWritePrice;
+    const cacheReadCost = (cacheRead / 1_000_000) * cacheReadPrice;
+
+    const totalCost = inputCost + outputCost + cacheWriteCost + cacheReadCost;
+
+    // What it would have cost without caching
+    const costWithoutCache = ((inputTokens / 1_000_000) * inputPrice) + outputCost;
+    const savings = costWithoutCache - totalCost;
+
+    return {
+        inputCost,
+        outputCost,
+        cacheWriteCost,
+        cacheReadCost,
+        totalCost,
+        costWithoutCache,
+        savings,
+    };
+}
+
+/**
+ * Format a timestamp as a time string
+ */
+function formatTime(timestamp) {
+    const d = new Date(timestamp);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+/**
+ * Format cost as currency
+ */
+function formatCost(cost) {
+    if (cost < 0.0001) return '<$0.0001';
+    if (cost < 0.01) return `$${cost.toFixed(4)}`;
+    return `$${cost.toFixed(4)}`;
+}
+
+/**
+ * Show the history modal
+ */
+function showHistoryModal() {
+    // Remove existing modal
+    const existing = document.getElementById('cache_history_modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'cache_history_modal';
+    modal.innerHTML = `
+        <div class="cache_modal_backdrop"></div>
+        <div class="cache_modal_content">
+            <div class="cache_modal_header">
+                <h3>Request History</h3>
+                <button class="cache_modal_close">&times;</button>
+            </div>
+            <div class="cache_modal_body">
+                <table class="cache_history_table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Model</th>
+                            <th>Input</th>
+                            <th>Output</th>
+                            <th>Cache Read</th>
+                            <th>Cache Write</th>
+                            <th>Status</th>
+                            <th>Cost</th>
+                            <th>Savings</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cache_history_tbody">
+                    </tbody>
+                </table>
+                ${sessionStats.requestHistory.length === 0 ? '<p style="text-align: center; opacity: 0.7; margin-top: 20px;">No requests recorded yet</p>' : ''}
+            </div>
+            <div class="cache_modal_footer">
+                <div class="cache_modal_summary">
+                    <span>Total Requests: <b>${sessionStats.totalRequests}</b></span>
+                    <span>Total Cost: <b>${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.totalCost || 0), 0))}</b></span>
+                    <span>Total Savings: <b class="good">${formatCost(sessionStats.requestHistory.reduce((sum, r) => sum + (r.costs?.savings || 0), 0))}</b></span>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Populate table
+    const tbody = document.getElementById('cache_history_tbody');
+    const history = [...sessionStats.requestHistory].reverse(); // Most recent first
+
+    for (const entry of history) {
+        const row = document.createElement('tr');
+        const u = entry.usage;
+        const c = entry.costs || {};
+
+        let status = '';
+        let statusClass = '';
+        if (entry.cacheHit) {
+            status = 'HIT';
+            statusClass = 'good';
+        } else if (entry.cacheWrite) {
+            status = 'WRITE';
+            statusClass = 'neutral';
+        } else {
+            status = 'MISS';
+            statusClass = 'bad';
+        }
+
+        // Shorten model name
+        let modelShort = u.model || 'Unknown';
+        modelShort = modelShort.replace('claude-', '').replace('-20250929', '').replace('-20251124', '');
+
+        row.innerHTML = `
+            <td>${formatTime(entry.timestamp)}</td>
+            <td title="${u.model}">${modelShort}</td>
+            <td>${(u.input_tokens || 0).toLocaleString()}</td>
+            <td>${(u.output_tokens || 0).toLocaleString()}</td>
+            <td class="good">${(u.cache_read_input_tokens || 0).toLocaleString()}</td>
+            <td class="neutral">${(u.cache_creation_input_tokens || 0).toLocaleString()}</td>
+            <td class="${statusClass}">${status}</td>
+            <td>${formatCost(c.totalCost || 0)}</td>
+            <td class="${c.savings > 0 ? 'good' : ''}">${c.savings > 0 ? '+' : ''}${formatCost(c.savings || 0)}</td>
+        `;
+        tbody.appendChild(row);
+    }
+
+    // Close handlers
+    modal.querySelector('.cache_modal_backdrop').addEventListener('click', () => modal.remove());
+    modal.querySelector('.cache_modal_close').addEventListener('click', () => modal.remove());
 }
 
 /**
@@ -498,7 +666,10 @@ function createPanel() {
             </div>
             <div id="cache_last_usage" style="font-size: 10px; opacity: 0.7; margin-top: 4px;">--</div>
             <div id="cache_recommendation">Waiting for requests...</div>
-            <button id="cache_reset_stats" class="cache_action_btn">Reset Stats</button>
+            <div class="cache_btn_row">
+                <button id="cache_show_history" class="cache_action_btn">View History</button>
+                <button id="cache_reset_stats" class="cache_action_btn">Reset</button>
+            </div>
         </div>
     `;
 
@@ -509,6 +680,10 @@ function createPanel() {
         document.getElementById('cache_monitor_toggle').textContent = panel.classList.contains('collapsed') ? '+' : '-';
         extension_settings[extensionName].panelCollapsed = panel.classList.contains('collapsed');
         saveSettingsDebounced();
+    });
+
+    document.getElementById('cache_show_history').addEventListener('click', () => {
+        showHistoryModal();
     });
 
     document.getElementById('cache_reset_stats').addEventListener('click', () => {

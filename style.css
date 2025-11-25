@@ -112,3 +112,140 @@
     background: #4ade80;
     color: #000;
 }
+
+.cache_btn_row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.cache_btn_row .cache_action_btn {
+    flex: 1;
+    margin-top: 0;
+}
+
+/* History Modal */
+#cache_history_modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cache_modal_backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.cache_modal_content {
+    position: relative;
+    background: var(--SmartThemeBlurTintColor, #1a1a2e);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 12px;
+    max-width: 90vw;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-width: 800px;
+}
+
+.cache_modal_header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.cache_modal_header h3 {
+    margin: 0;
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.cache_modal_close {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: var(--SmartThemeBodyColor, #aaa);
+    padding: 0;
+    line-height: 1;
+}
+
+.cache_modal_close:hover {
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.cache_modal_body {
+    overflow-y: auto;
+    padding: 0;
+    flex: 1;
+}
+
+.cache_history_table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.cache_history_table th,
+.cache_history_table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #333);
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.cache_history_table th {
+    background: rgba(0, 0, 0, 0.3);
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.cache_history_table tr:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.cache_history_table td.good {
+    color: #4ade80;
+}
+
+.cache_history_table td.bad {
+    color: #f87171;
+}
+
+.cache_history_table td.neutral {
+    color: #fbbf24;
+}
+
+.cache_modal_footer {
+    padding: 15px 20px;
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.cache_modal_summary {
+    display: flex;
+    gap: 30px;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.cache_modal_summary b {
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.cache_modal_summary b.good {
+    color: #4ade80;
+}
