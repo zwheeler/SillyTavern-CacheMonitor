@@ -43,12 +43,130 @@ let currentRequest = {
     active: false,
     startTime: null,
     usage: null,
+    messages: null, // Store the messages sent
 };
 
 /**
  * Track if we've seen any Claude usage this session
  */
 let detectedClaudeUsage = false;
+
+/**
+ * Store previous request data for comparison
+ */
+let previousRequest = {
+    messages: null,
+    messageHashes: null,
+    systemPrompt: null,
+    systemPromptHash: null,
+    timestamp: null,
+};
+
+/**
+ * Simple string hash function
+ */
+function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash.toString(16);
+}
+
+/**
+ * Hash each message in the array
+ */
+function hashMessages(messages) {
+    if (!messages || !Array.isArray(messages)) return [];
+    return messages.map((msg, idx) => ({
+        index: idx,
+        role: msg.role,
+        contentPreview: typeof msg.content === 'string'
+            ? msg.content.substring(0, 100)
+            : JSON.stringify(msg.content).substring(0, 100),
+        hash: hashString(JSON.stringify(msg)),
+        hasCacheControl: !!msg.cache_control,
+    }));
+}
+
+/**
+ * Find where messages diverge between two requests
+ */
+function findDivergencePoint(prevHashes, currHashes) {
+    if (!prevHashes || !currHashes) return { divergeIndex: 0, reason: 'No previous data' };
+
+    const minLen = Math.min(prevHashes.length, currHashes.length);
+
+    for (let i = 0; i < minLen; i++) {
+        if (prevHashes[i].hash !== currHashes[i].hash) {
+            return {
+                divergeIndex: i,
+                reason: `Message ${i} changed`,
+                prevContent: prevHashes[i].contentPreview,
+                currContent: currHashes[i].contentPreview,
+                role: currHashes[i].role,
+            };
+        }
+    }
+
+    if (prevHashes.length !== currHashes.length) {
+        return {
+            divergeIndex: minLen,
+            reason: `Message count changed (${prevHashes.length} → ${currHashes.length})`,
+        };
+    }
+
+    return { divergeIndex: -1, reason: 'No divergence detected' };
+}
+
+/**
+ * Analyze why cache missed
+ */
+function analyzeCacheMiss(currentMessages, currentHashes) {
+    const analysis = {
+        reasons: [],
+        divergence: null,
+        ttlWarning: false,
+        timeSinceLastRequest: null,
+    };
+
+    // Check TTL (5 minutes = 300000ms)
+    if (previousRequest.timestamp) {
+        const timeSince = Date.now() - previousRequest.timestamp;
+        analysis.timeSinceLastRequest = timeSince;
+        if (timeSince > 300000) {
+            analysis.reasons.push(`TTL expired (${Math.round(timeSince / 1000)}s since last request, max 300s)`);
+            analysis.ttlWarning = true;
+        }
+    } else {
+        analysis.reasons.push('First request - no previous cache');
+    }
+
+    // Check for divergence
+    if (previousRequest.messageHashes) {
+        const divergence = findDivergencePoint(previousRequest.messageHashes, currentHashes);
+        analysis.divergence = divergence;
+
+        if (divergence.divergeIndex >= 0) {
+            analysis.reasons.push(divergence.reason);
+        }
+    }
+
+    // Check if system prompt changed
+    if (currentMessages && currentMessages.length > 0) {
+        const firstMsg = currentMessages[0];
+        if (firstMsg.role === 'system') {
+            const currSysHash = hashString(JSON.stringify(firstMsg));
+            if (previousRequest.systemPromptHash && previousRequest.systemPromptHash !== currSysHash) {
+                analysis.reasons.push('System prompt changed');
+            }
+        }
+    }
+
+    return analysis;
+}
 
 /**
  * Fetch detailed generation stats from OpenRouter API
@@ -178,9 +296,20 @@ function processUsageData(usage) {
         sessionStats.consecutiveMisses++;
     }
 
-    // Store in history with cost calculation
+    // Store in history with cost calculation and analysis
     const responseTime = currentRequest.startTime ? Date.now() - currentRequest.startTime : 0;
     const costs = calculateCosts(usage);
+
+    // Analyze current request
+    const currentHashes = hashMessages(currentRequest.messages);
+    let analysis = null;
+
+    // If cache miss (write but no read), analyze why
+    if (hadCacheWrite && !hadCacheRead) {
+        analysis = analyzeCacheMiss(currentRequest.messages, currentHashes);
+        log('Cache miss analysis:', analysis);
+    }
+
     sessionStats.requestHistory.push({
         timestamp: Date.now(),
         responseTimeMs: responseTime,
@@ -188,7 +317,23 @@ function processUsageData(usage) {
         cacheHit: hadCacheRead,
         cacheWrite: hadCacheWrite,
         costs,
+        analysis,
+        messageHashes: currentHashes,
+        messageCount: currentRequest.messages?.length || 0,
     });
+
+    // Store current request as previous for next comparison
+    if (currentRequest.messages) {
+        previousRequest = {
+            messages: currentRequest.messages,
+            messageHashes: currentHashes,
+            systemPrompt: currentRequest.messages[0]?.role === 'system' ? currentRequest.messages[0] : null,
+            systemPromptHash: currentRequest.messages[0]?.role === 'system'
+                ? hashString(JSON.stringify(currentRequest.messages[0]))
+                : null,
+            timestamp: Date.now(),
+        };
+    }
 
     if (sessionStats.requestHistory.length > 100) {
         sessionStats.requestHistory.shift();
@@ -305,13 +450,13 @@ function showHistoryModal() {
                         <tr>
                             <th>Time</th>
                             <th>Model</th>
+                            <th>Msgs</th>
                             <th>Input</th>
-                            <th>Output</th>
                             <th>Cache Read</th>
                             <th>Cache Write</th>
                             <th>Status</th>
                             <th>Cost</th>
-                            <th>Savings</th>
+                            <th>Analysis</th>
                         </tr>
                     </thead>
                     <tbody id="cache_history_tbody">
@@ -335,15 +480,18 @@ function showHistoryModal() {
     const tbody = document.getElementById('cache_history_tbody');
     const history = [...sessionStats.requestHistory].reverse(); // Most recent first
 
-    for (const entry of history) {
+    for (let i = 0; i < history.length; i++) {
+        const entry = history[i];
         const row = document.createElement('tr');
+        row.className = 'cache_history_row';
+        row.dataset.index = i;
         const u = entry.usage;
         const c = entry.costs || {};
 
         let status = '';
         let statusClass = '';
         if (entry.cacheHit) {
-            status = 'HIT';
+            status = 'HIT ✓';
             statusClass = 'good';
         } else if (entry.cacheWrite) {
             status = 'WRITE';
@@ -357,23 +505,172 @@ function showHistoryModal() {
         let modelShort = u.model || 'Unknown';
         modelShort = modelShort.replace('claude-', '').replace('-20250929', '').replace('-20251124', '');
 
+        // Analysis summary
+        let analysisText = '';
+        let analysisClass = '';
+        if (entry.cacheHit) {
+            analysisText = 'Cache working';
+            analysisClass = 'good';
+        } else if (entry.analysis) {
+            if (entry.analysis.reasons.length > 0) {
+                analysisText = entry.analysis.reasons[0];
+                if (entry.analysis.reasons.length > 1) {
+                    analysisText += ` (+${entry.analysis.reasons.length - 1})`;
+                }
+            }
+            analysisClass = entry.analysis.ttlWarning ? 'neutral' : 'bad';
+        } else {
+            analysisText = '--';
+        }
+
         row.innerHTML = `
             <td>${formatTime(entry.timestamp)}</td>
             <td title="${u.model}">${modelShort}</td>
+            <td>${entry.messageCount || '--'}</td>
             <td>${(u.input_tokens || 0).toLocaleString()}</td>
-            <td>${(u.output_tokens || 0).toLocaleString()}</td>
             <td class="good">${(u.cache_read_input_tokens || 0).toLocaleString()}</td>
             <td class="neutral">${(u.cache_creation_input_tokens || 0).toLocaleString()}</td>
             <td class="${statusClass}">${status}</td>
             <td>${formatCost(c.totalCost || 0)}</td>
-            <td class="${c.savings > 0 ? 'good' : ''}">${c.savings > 0 ? '+' : ''}${formatCost(c.savings || 0)}</td>
+            <td class="${analysisClass} analysis-cell" title="Click for details">${analysisText}</td>
         `;
+
+        // Add click handler to show detailed analysis
+        row.addEventListener('click', () => showAnalysisDetail(entry, i));
         tbody.appendChild(row);
     }
 
     // Close handlers
     modal.querySelector('.cache_modal_backdrop').addEventListener('click', () => modal.remove());
     modal.querySelector('.cache_modal_close').addEventListener('click', () => modal.remove());
+}
+
+/**
+ * Show detailed analysis for a request
+ */
+function showAnalysisDetail(entry, index) {
+    const existing = document.getElementById('cache_analysis_detail');
+    if (existing) existing.remove();
+
+    const u = entry.usage;
+    const a = entry.analysis;
+
+    let detailHtml = `
+        <div class="analysis_section">
+            <h4>Request Details</h4>
+            <div class="analysis_row"><span>Time:</span> <span>${formatTime(entry.timestamp)}</span></div>
+            <div class="analysis_row"><span>Model:</span> <span>${u.model}</span></div>
+            <div class="analysis_row"><span>Messages:</span> <span>${entry.messageCount || 'Unknown'}</span></div>
+            <div class="analysis_row"><span>Input Tokens:</span> <span>${(u.input_tokens || 0).toLocaleString()}</span></div>
+            <div class="analysis_row"><span>Output Tokens:</span> <span>${(u.output_tokens || 0).toLocaleString()}</span></div>
+            <div class="analysis_row"><span>Cache Read:</span> <span class="good">${(u.cache_read_input_tokens || 0).toLocaleString()}</span></div>
+            <div class="analysis_row"><span>Cache Write:</span> <span class="neutral">${(u.cache_creation_input_tokens || 0).toLocaleString()}</span></div>
+        </div>
+    `;
+
+    if (entry.cacheHit) {
+        detailHtml += `
+            <div class="analysis_section success">
+                <h4>✓ Cache Hit</h4>
+                <p>The prompt prefix matched the cached version. ${(u.cache_read_input_tokens || 0).toLocaleString()} tokens were read from cache.</p>
+            </div>
+        `;
+    } else if (a) {
+        detailHtml += `
+            <div class="analysis_section warning">
+                <h4>⚠ Cache Miss - Why?</h4>
+                <ul class="analysis_reasons">
+                    ${a.reasons.map(r => `<li>${r}</li>`).join('')}
+                </ul>
+            </div>
+        `;
+
+        if (a.divergence && a.divergence.divergeIndex >= 0) {
+            detailHtml += `
+                <div class="analysis_section">
+                    <h4>Divergence Point</h4>
+                    <p>Messages diverged at index <b>${a.divergence.divergeIndex}</b> (${a.divergence.role || 'unknown'} role)</p>
+                    ${a.divergence.prevContent ? `
+                        <div class="diff_box">
+                            <div class="diff_label">Previous:</div>
+                            <div class="diff_content">${escapeHtml(a.divergence.prevContent)}...</div>
+                        </div>
+                        <div class="diff_box">
+                            <div class="diff_label">Current:</div>
+                            <div class="diff_content">${escapeHtml(a.divergence.currContent)}...</div>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        if (a.timeSinceLastRequest) {
+            const seconds = Math.round(a.timeSinceLastRequest / 1000);
+            const ttlClass = seconds > 300 ? 'bad' : (seconds > 240 ? 'neutral' : 'good');
+            detailHtml += `
+                <div class="analysis_section">
+                    <h4>TTL Status</h4>
+                    <p>Time since last request: <span class="${ttlClass}">${seconds}s</span> (TTL: 300s)</p>
+                    <div class="ttl_bar">
+                        <div class="ttl_fill ${ttlClass}" style="width: ${Math.min(100, (seconds / 300) * 100)}%"></div>
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    // Message structure visualization
+    if (entry.messageHashes && entry.messageHashes.length > 0) {
+        detailHtml += `
+            <div class="analysis_section">
+                <h4>Message Structure</h4>
+                <div class="message_structure">
+                    ${entry.messageHashes.map((h, i) => `
+                        <div class="msg_block ${h.hasCacheControl ? 'has_cache' : ''}" title="${h.contentPreview}">
+                            <span class="msg_index">${i}</span>
+                            <span class="msg_role">${h.role}</span>
+                            ${h.hasCacheControl ? '<span class="cache_marker">⚡</span>' : ''}
+                        </div>
+                    `).join('')}
+                </div>
+                <p class="structure_legend">
+                    <span class="legend_item"><span class="cache_marker">⚡</span> = cache_control marker</span>
+                </p>
+            </div>
+        `;
+    }
+
+    const detail = document.createElement('div');
+    detail.id = 'cache_analysis_detail';
+    detail.innerHTML = `
+        <div class="cache_modal_backdrop"></div>
+        <div class="cache_detail_content">
+            <div class="cache_modal_header">
+                <h3>Request Analysis #${sessionStats.requestHistory.length - index}</h3>
+                <button class="cache_modal_close">&times;</button>
+            </div>
+            <div class="cache_detail_body">
+                ${detailHtml}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(detail);
+
+    detail.querySelector('.cache_modal_backdrop').addEventListener('click', () => detail.remove());
+    detail.querySelector('.cache_modal_close').addEventListener('click', () => detail.remove());
+}
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(str) {
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
 /**
@@ -412,13 +709,15 @@ function setupFetchInterceptor() {
         // Intercept ALL chat completion requests - we'll check for cache data in the response
         log('Intercepting chat completion request:', urlStr);
 
-        // Check if streaming
+        // Check if streaming and capture messages
         let isStreaming = false;
+        let requestMessages = null;
         try {
             if (options?.body) {
                 const body = JSON.parse(options.body);
                 isStreaming = body.stream === true;
-                log('Request streaming:', isStreaming);
+                requestMessages = body.messages || null;
+                log('Request streaming:', isStreaming, 'Messages:', requestMessages?.length || 0);
             }
         } catch (e) {
             log('Could not parse request body');
@@ -427,6 +726,7 @@ function setupFetchInterceptor() {
         currentRequest.active = true;
         currentRequest.startTime = Date.now();
         currentRequest.usage = null;
+        currentRequest.messages = requestMessages;
 
         const response = await originalFetch.apply(this, args);
 
