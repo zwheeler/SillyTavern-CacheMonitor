@@ -284,7 +284,8 @@
     background: var(--SmartThemeBlurTintColor, #1a1a2e);
     border: 1px solid var(--SmartThemeBorderColor, #444);
     border-radius: 12px;
-    max-width: 600px;
+    max-width: 900px;
+    width: 90vw;
     max-height: 80vh;
     overflow: hidden;
     display: flex;
@@ -336,11 +337,25 @@
     margin: 5px 0;
 }
 
+.diff_container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
+}
+
 .diff_box {
-    margin: 10px 0;
     background: rgba(0, 0, 0, 0.3);
     border-radius: 4px;
     overflow: hidden;
+}
+
+.diff_box.prev {
+    border-left: 3px solid #f87171;
+}
+
+.diff_box.curr {
+    border-left: 3px solid #4ade80;
 }
 
 .diff_label {
@@ -357,6 +372,25 @@
     color: var(--SmartThemeBodyColor, #ccc);
     white-space: pre-wrap;
     word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.diff_match {
+    color: var(--SmartThemeBodyColor, #888);
+}
+
+.diff_changed {
+    background: rgba(251, 191, 36, 0.3);
+    color: #fbbf24;
+    border-radius: 2px;
+    padding: 0 2px;
+}
+
+.diff_length {
+    font-size: 12px;
+    color: #fbbf24;
+    margin: 5px 0;
 }
 
 .ttl_bar {

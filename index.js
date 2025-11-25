@@ -80,15 +80,52 @@ function hashString(str) {
  */
 function hashMessages(messages) {
     if (!messages || !Array.isArray(messages)) return [];
-    return messages.map((msg, idx) => ({
-        index: idx,
-        role: msg.role,
-        contentPreview: typeof msg.content === 'string'
-            ? msg.content.substring(0, 100)
-            : JSON.stringify(msg.content).substring(0, 100),
-        hash: hashString(JSON.stringify(msg)),
-        hasCacheControl: !!msg.cache_control,
-    }));
+    return messages.map((msg, idx) => {
+        const fullContent = typeof msg.content === 'string'
+            ? msg.content
+            : JSON.stringify(msg.content);
+        return {
+            index: idx,
+            role: msg.role,
+            contentPreview: fullContent.substring(0, 100),
+            fullContent: fullContent, // Store full content for diff
+            hash: hashString(JSON.stringify(msg)),
+            hasCacheControl: !!msg.cache_control,
+        };
+    });
+}
+
+/**
+ * Find the first difference between two strings and return context around it
+ */
+function findStringDiff(str1, str2, contextChars = 200) {
+    if (!str1 || !str2) return { diffIndex: 0, context1: str1?.substring(0, 500) || '', context2: str2?.substring(0, 500) || '' };
+
+    // Find first differing character
+    let diffIndex = 0;
+    const minLen = Math.min(str1.length, str2.length);
+    while (diffIndex < minLen && str1[diffIndex] === str2[diffIndex]) {
+        diffIndex++;
+    }
+
+    // Get context around the diff point
+    const start = Math.max(0, diffIndex - contextChars);
+    const end1 = Math.min(str1.length, diffIndex + contextChars);
+    const end2 = Math.min(str2.length, diffIndex + contextChars);
+
+    const context1 = (start > 0 ? '...' : '') + str1.substring(start, end1) + (end1 < str1.length ? '...' : '');
+    const context2 = (start > 0 ? '...' : '') + str2.substring(start, end2) + (end2 < str2.length ? '...' : '');
+
+    // Mark the diff position in context
+    const markerPos = diffIndex - start + (start > 0 ? 3 : 0);
+
+    return {
+        diffIndex,
+        markerPos,
+        context1,
+        context2,
+        lengthDiff: str1.length !== str2.length ? `Length: ${str1.length} → ${str2.length}` : null,
+    };
 }
 
 /**
@@ -101,11 +138,14 @@ function findDivergencePoint(prevHashes, currHashes) {
 
     for (let i = 0; i < minLen; i++) {
         if (prevHashes[i].hash !== currHashes[i].hash) {
+            // Find exactly where in the content the difference is
+            const diff = findStringDiff(prevHashes[i].fullContent, currHashes[i].fullContent);
             return {
                 divergeIndex: i,
-                reason: `Message ${i} changed`,
-                prevContent: prevHashes[i].contentPreview,
-                currContent: currHashes[i].contentPreview,
+                reason: `Message ${i} (${currHashes[i].role}) changed at char ${diff.diffIndex}`,
+                prevContent: prevHashes[i].fullContent,
+                currContent: currHashes[i].fullContent,
+                diff: diff,
                 role: currHashes[i].role,
             };
         }
@@ -586,18 +626,23 @@ function showAnalysisDetail(entry, index) {
         `;
 
         if (a.divergence && a.divergence.divergeIndex >= 0) {
+            const d = a.divergence;
+            const diff = d.diff;
             detailHtml += `
                 <div class="analysis_section">
                     <h4>Divergence Point</h4>
-                    <p>Messages diverged at index <b>${a.divergence.divergeIndex}</b> (${a.divergence.role || 'unknown'} role)</p>
-                    ${a.divergence.prevContent ? `
-                        <div class="diff_box">
-                            <div class="diff_label">Previous:</div>
-                            <div class="diff_content">${escapeHtml(a.divergence.prevContent)}...</div>
-                        </div>
-                        <div class="diff_box">
-                            <div class="diff_label">Current:</div>
-                            <div class="diff_content">${escapeHtml(a.divergence.currContent)}...</div>
+                    <p>Message <b>${d.divergeIndex}</b> (${d.role || 'unknown'}) changed at character <b>${diff?.diffIndex || 0}</b></p>
+                    ${diff?.lengthDiff ? `<p class="diff_length">${diff.lengthDiff}</p>` : ''}
+                    ${diff ? `
+                        <div class="diff_container">
+                            <div class="diff_box prev">
+                                <div class="diff_label">Previous content around change:</div>
+                                <div class="diff_content"><span class="diff_match">${escapeHtml(diff.context1.substring(0, diff.markerPos))}</span><span class="diff_changed">${escapeHtml(diff.context1.substring(diff.markerPos))}</span></div>
+                            </div>
+                            <div class="diff_box curr">
+                                <div class="diff_label">Current content around change:</div>
+                                <div class="diff_content"><span class="diff_match">${escapeHtml(diff.context2.substring(0, diff.markerPos))}</span><span class="diff_changed">${escapeHtml(diff.context2.substring(diff.markerPos))}</span></div>
+                            </div>
                         </div>
                     ` : ''}
                 </div>
