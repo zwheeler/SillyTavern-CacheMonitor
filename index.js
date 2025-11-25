@@ -50,6 +50,52 @@ let currentRequest = {
 let detectedClaudeUsage = false;
 
 /**
+ * Fetch detailed generation stats from OpenRouter API
+ * @param {string} generationId - The generation ID from the response
+ * @returns {Promise<object|null>} Generation details with cache info
+ */
+async function fetchOpenRouterGenerationStats(generationId) {
+    try {
+        // Get the OpenRouter API key from SillyTavern's secrets
+        const response = await fetch('/api/secrets/view', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'api_key_openrouter' }),
+        });
+
+        if (!response.ok) {
+            log('Could not get OpenRouter API key');
+            return null;
+        }
+
+        const { value: apiKey } = await response.json();
+        if (!apiKey) {
+            log('OpenRouter API key not found');
+            return null;
+        }
+
+        // Query OpenRouter's generation endpoint
+        const genResponse = await fetch(`https://openrouter.ai/api/v1/generation?id=${generationId}`, {
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+            },
+        });
+
+        if (!genResponse.ok) {
+            log('OpenRouter generation query failed:', genResponse.status);
+            return null;
+        }
+
+        const genData = await genResponse.json();
+        log('OpenRouter generation data:', genData);
+        return genData?.data;
+    } catch (e) {
+        log('Error fetching OpenRouter generation stats:', e);
+        return null;
+    }
+}
+
+/**
  * Parse usage data from SSE event
  * Handles both OpenRouter (OpenAI format) and direct Claude format
  * Returns { usage, model } or null
@@ -232,13 +278,39 @@ function setupFetchInterceptor() {
                 const cloned = response.clone();
                 const data = await cloned.json();
                 log('Non-streaming response:', data);
+
+                // Check if this is an OpenRouter response (has generation id starting with "gen-")
+                const isOpenRouter = data.id && data.id.startsWith('gen-');
+                let cacheRead = data.usage?.cache_read_input_tokens || 0;
+                let cacheWrite = data.usage?.cache_creation_input_tokens || 0;
+
+                // If OpenRouter and no cache data in response, fetch from their API
+                if (isOpenRouter && cacheRead === 0 && cacheWrite === 0 && /claude/i.test(data.model)) {
+                    log('Fetching OpenRouter generation stats for:', data.id);
+                    const genStats = await fetchOpenRouterGenerationStats(data.id);
+                    if (genStats) {
+                        // OpenRouter returns native_tokens_cached for cache reads
+                        // We need to estimate cache writes from usage_cache cost
+                        cacheRead = genStats.native_tokens_cached || 0;
+                        // If usage_cache > 0 but native_tokens_cached is 0, it's a cache write
+                        // Cache write cost is 25% more, so tokens ~= usage_cache / (input_price * 1.25)
+                        // For simplicity, we'll estimate based on prompt tokens if there's cache activity
+                        if (genStats.usage_cache > 0 && cacheRead === 0) {
+                            // This was a cache write - estimate tokens written
+                            // We'll use native_tokens_prompt as an approximation
+                            cacheWrite = genStats.native_tokens_prompt || 0;
+                        }
+                        log('OpenRouter cache stats - read:', cacheRead, 'write:', cacheWrite);
+                    }
+                }
+
                 if (data.usage) {
                     processUsageData({
                         model: data.model || '',
                         input_tokens: data.usage.prompt_tokens || data.usage.input_tokens || 0,
                         output_tokens: data.usage.completion_tokens || data.usage.output_tokens || 0,
-                        cache_read_input_tokens: data.usage.cache_read_input_tokens || 0,
-                        cache_creation_input_tokens: data.usage.cache_creation_input_tokens || 0,
+                        cache_read_input_tokens: cacheRead,
+                        cache_creation_input_tokens: cacheWrite,
                     });
                 }
             } catch (e) {
