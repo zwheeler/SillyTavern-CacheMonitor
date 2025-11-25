@@ -45,22 +45,14 @@ let currentRequest = {
 };
 
 /**
- * Check if usage data contains Claude cache tokens
- * Instead of trying to detect model upfront, we just check if the response has cache data
- */
-function hasCacheData(usage) {
-    if (!usage) return false;
-    return (usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0);
-}
-
-/**
- * Track if we've seen any cache data this session (to know Claude is being used)
+ * Track if we've seen any Claude usage this session
  */
 let detectedClaudeUsage = false;
 
 /**
  * Parse usage data from SSE event
  * Handles both OpenRouter (OpenAI format) and direct Claude format
+ * Returns { usage, model } or null
  */
 function parseUsageFromEvent(eventData) {
     try {
@@ -68,8 +60,9 @@ function parseUsageFromEvent(eventData) {
 
         // OpenRouter/OpenAI format - usage in root or in choices
         if (data.usage) {
-            log('Found usage in OpenAI format:', data.usage);
+            log('Found usage in OpenAI format:', data.usage, 'model:', data.model);
             return {
+                model: data.model || '',
                 input_tokens: data.usage.prompt_tokens || data.usage.input_tokens || 0,
                 output_tokens: data.usage.completion_tokens || data.usage.output_tokens || 0,
                 // OpenRouter passes through Claude's cache tokens
@@ -83,6 +76,7 @@ function parseUsageFromEvent(eventData) {
         if (data.type === 'message_delta' && data.usage) {
             log('Found usage in Claude message_delta:', data.usage);
             return {
+                model: 'claude', // Direct Claude API
                 input_tokens: data.usage.input_tokens || 0,
                 output_tokens: data.usage.output_tokens || 0,
                 cache_read_input_tokens: data.usage.cache_read_input_tokens || 0,
@@ -94,6 +88,7 @@ function parseUsageFromEvent(eventData) {
         if (data.type === 'message_start' && data.message?.usage) {
             log('Found usage in Claude message_start:', data.message.usage);
             return {
+                model: data.message?.model || 'claude', // Direct Claude API
                 input_tokens: data.message.usage.input_tokens || 0,
                 output_tokens: data.message.usage.output_tokens || 0,
                 cache_read_input_tokens: data.message.usage.cache_read_input_tokens || 0,
@@ -113,14 +108,19 @@ function parseUsageFromEvent(eventData) {
 function processUsageData(usage) {
     if (!usage) return;
 
-    const hadCacheRead = (usage.cache_read_input_tokens || 0) > 0;
-    const hadCacheWrite = (usage.cache_creation_input_tokens || 0) > 0;
+    // Check if this is a Claude model by looking at the model field in the response
+    const model = usage.model || '';
+    const isClaude = /claude/i.test(model);
 
-    // Only track stats if we have cache data (meaning Claude is being used)
-    if (!hadCacheRead && !hadCacheWrite) {
-        log('No cache data in response - not a Claude request or caching disabled');
+    if (!isClaude) {
+        log('Not a Claude model, skipping. Model:', model);
         return;
     }
+
+    log('Claude model detected:', model);
+
+    const hadCacheRead = (usage.cache_read_input_tokens || 0) > 0;
+    const hadCacheWrite = (usage.cache_creation_input_tokens || 0) > 0;
 
     // Mark that we've detected Claude usage
     detectedClaudeUsage = true;
@@ -234,6 +234,7 @@ function setupFetchInterceptor() {
                 log('Non-streaming response:', data);
                 if (data.usage) {
                     processUsageData({
+                        model: data.model || '',
                         input_tokens: data.usage.prompt_tokens || data.usage.input_tokens || 0,
                         output_tokens: data.usage.completion_tokens || data.usage.output_tokens || 0,
                         cache_read_input_tokens: data.usage.cache_read_input_tokens || 0,
