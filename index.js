@@ -5,9 +5,8 @@
  * Works with OpenRouter and direct Claude API.
  */
 
-import { eventSource, event_types, saveSettingsDebounced, chat } from '../../../../script.js';
+import { saveSettingsDebounced, chat } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
-import { oai_settings, chat_completion_sources } from '../../../openai.js';
 
 const extensionName = 'SillyTavern-CacheMonitor';
 const DEBUG = true; // Set to true to see console logs
@@ -46,29 +45,18 @@ let currentRequest = {
 };
 
 /**
- * Check if the current model is a Claude model (direct or via OpenRouter)
+ * Check if usage data contains Claude cache tokens
+ * Instead of trying to detect model upfront, we just check if the response has cache data
  */
-function isClaudeModel() {
-    const source = oai_settings?.chat_completion_source;
-    const model = oai_settings?.openai_model || '';
-
-    log('Checking model - source:', source, 'model:', model);
-
-    // OpenRouter with Claude
-    if (source === chat_completion_sources.OPENROUTER && /claude/i.test(model)) {
-        log('Detected: OpenRouter + Claude');
-        return true;
-    }
-
-    // Direct Claude API
-    if (source === chat_completion_sources.CLAUDE) {
-        log('Detected: Direct Claude API');
-        return true;
-    }
-
-    log('Not a Claude model');
-    return false;
+function hasCacheData(usage) {
+    if (!usage) return false;
+    return (usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0);
 }
+
+/**
+ * Track if we've seen any cache data this session (to know Claude is being used)
+ */
+let detectedClaudeUsage = false;
 
 /**
  * Parse usage data from SSE event
@@ -125,6 +113,18 @@ function parseUsageFromEvent(eventData) {
 function processUsageData(usage) {
     if (!usage) return;
 
+    const hadCacheRead = (usage.cache_read_input_tokens || 0) > 0;
+    const hadCacheWrite = (usage.cache_creation_input_tokens || 0) > 0;
+
+    // Only track stats if we have cache data (meaning Claude is being used)
+    if (!hadCacheRead && !hadCacheWrite) {
+        log('No cache data in response - not a Claude request or caching disabled');
+        return;
+    }
+
+    // Mark that we've detected Claude usage
+    detectedClaudeUsage = true;
+
     currentRequest.usage = usage;
     sessionStats.totalRequests++;
     sessionStats.totalInputTokens += usage.input_tokens || 0;
@@ -132,17 +132,11 @@ function processUsageData(usage) {
     sessionStats.totalCacheWriteTokens += usage.cache_creation_input_tokens || 0;
     sessionStats.lastUsage = usage;
 
-    const hadCacheRead = (usage.cache_read_input_tokens || 0) > 0;
-    const hadCacheWrite = (usage.cache_creation_input_tokens || 0) > 0;
-
     if (hadCacheRead) {
         sessionStats.cacheHits++;
         sessionStats.consecutiveMisses = 0;
     } else if (hadCacheWrite) {
         sessionStats.cacheMisses++;
-        sessionStats.consecutiveMisses++;
-    } else {
-        // No cache activity
         sessionStats.consecutiveMisses++;
     }
 
@@ -209,12 +203,7 @@ function setupFetchInterceptor() {
             return originalFetch.apply(this, args);
         }
 
-        // Check if using Claude model
-        if (!isClaudeModel()) {
-            log('Skipping - not Claude model');
-            return originalFetch.apply(this, args);
-        }
-
+        // Intercept ALL chat completion requests - we'll check for cache data in the response
         log('Intercepting chat completion request:', urlStr);
 
         // Check if streaming
@@ -374,8 +363,8 @@ function updatePanel() {
     document.getElementById('cache_efficiency_fill').style.width = `${hitRate}%`;
 
     const recEl = document.getElementById('cache_recommendation');
-    if (!isClaudeModel()) {
-        recEl.textContent = 'Not using Claude model';
+    if (!detectedClaudeUsage && sessionStats.totalRequests === 0) {
+        recEl.textContent = 'Waiting for Claude requests...';
         recEl.style.color = '';
     } else if (sessionStats.consecutiveMisses >= settings.wasteThreshold) {
         recEl.textContent = `Warning: ${sessionStats.consecutiveMisses} consecutive misses`;
@@ -469,6 +458,7 @@ function createPanel() {
             lastUsage: null,
             requestHistory: [],
         };
+        detectedClaudeUsage = false;
         updatePanel();
         toastr.info('Cache stats reset');
     });
