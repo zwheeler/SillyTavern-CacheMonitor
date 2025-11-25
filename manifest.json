@@ -1,0 +1,12 @@
+{
+    "display_name": "Claude Cache Monitor",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Zev",
+    "version": "1.0.0",
+    "homePage": "https://github.com/zwheeler/SillyTavern-CacheMonitor",
+    "auto_update": true
+}

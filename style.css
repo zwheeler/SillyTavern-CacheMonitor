@@ -1,0 +1,114 @@
+#cache_monitor_panel {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.8));
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 8px;
+    padding: 10px 15px;
+    font-size: 12px;
+    z-index: 9999;
+    min-width: 200px;
+    backdrop-filter: blur(10px);
+}
+
+#cache_monitor_panel.collapsed {
+    min-width: auto;
+    padding: 5px 10px;
+}
+
+#cache_monitor_panel.collapsed .cache_monitor_content {
+    display: none;
+}
+
+#cache_monitor_header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    margin-bottom: 8px;
+}
+
+#cache_monitor_panel.collapsed #cache_monitor_header {
+    margin-bottom: 0;
+}
+
+#cache_monitor_title {
+    font-weight: bold;
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+#cache_monitor_toggle {
+    color: var(--SmartThemeBodyColor, #aaa);
+}
+
+.cache_stat_row {
+    display: flex;
+    justify-content: space-between;
+    margin: 4px 0;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.cache_stat_label {
+    opacity: 0.8;
+}
+
+.cache_stat_value {
+    font-family: monospace;
+    font-weight: bold;
+}
+
+.cache_stat_value.good {
+    color: #4ade80;
+}
+
+.cache_stat_value.bad {
+    color: #f87171;
+}
+
+.cache_stat_value.neutral {
+    color: #fbbf24;
+}
+
+#cache_efficiency_bar {
+    height: 4px;
+    background: #333;
+    border-radius: 2px;
+    margin-top: 8px;
+    overflow: hidden;
+}
+
+#cache_efficiency_fill {
+    height: 100%;
+    background: linear-gradient(90deg, #f87171, #fbbf24, #4ade80);
+    transition: width 0.3s ease;
+}
+
+#cache_recommendation {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+    font-size: 11px;
+    color: var(--SmartThemeBodyColor, #aaa);
+}
+
+.cache_action_btn {
+    margin-top: 8px;
+    padding: 4px 8px;
+    background: var(--SmartThemeQuoteColor, #4a5568);
+    border: none;
+    border-radius: 4px;
+    color: var(--SmartThemeBodyColor, #fff);
+    cursor: pointer;
+    font-size: 11px;
+    width: 100%;
+}
+
+.cache_action_btn:hover {
+    opacity: 0.8;
+}
+
+.cache_action_btn.active {
+    background: #4ade80;
+    color: #000;
+}
