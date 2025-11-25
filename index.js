@@ -22,6 +22,7 @@ const defaultSettings = {
     autoPauseOnWaste: true,
     wasteThreshold: 3,
     showPanel: true,
+    openrouterApiKey: '', // User's OpenRouter API key for generation stats
 };
 
 // Session statistics
@@ -56,21 +57,12 @@ let detectedClaudeUsage = false;
  */
 async function fetchOpenRouterGenerationStats(generationId) {
     try {
-        // Get the OpenRouter API key from SillyTavern's secrets
-        const response = await fetch('/api/secrets/view', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: 'api_key_openrouter' }),
-        });
+        // Get the OpenRouter API key from extension settings
+        const settings = extension_settings[extensionName];
+        const apiKey = settings?.openrouterApiKey;
 
-        if (!response.ok) {
-            log('Could not get OpenRouter API key');
-            return null;
-        }
-
-        const { value: apiKey } = await response.json();
         if (!apiKey) {
-            log('OpenRouter API key not found');
+            log('OpenRouter API key not configured in extension settings');
             return null;
         }
 
@@ -576,6 +568,12 @@ async function addSettingsUI() {
                         <input type="number" id="cache_monitor_waste_threshold" min="1" max="10" value="3" style="width: 50px" />
                         <small>misses</small>
                     </div>
+                    <hr>
+                    <div>
+                        <label for="cache_monitor_openrouter_key">OpenRouter API Key:</label>
+                        <input type="password" id="cache_monitor_openrouter_key" class="text_pole" placeholder="sk-or-..." style="width: 100%; margin-top: 5px;" />
+                        <small style="opacity: 0.7;">Required to fetch cache stats from OpenRouter</small>
+                    </div>
                 </div>
             </div>
         </div>
@@ -596,6 +594,13 @@ async function addSettingsUI() {
     $('#cache_monitor_waste_threshold').val(settings.wasteThreshold).on('change', function () {
         settings.wasteThreshold = parseInt(this.value) || 3;
         saveSettingsDebounced();
+    });
+    $('#cache_monitor_openrouter_key').val(settings.openrouterApiKey || '').on('change', function () {
+        settings.openrouterApiKey = this.value.trim();
+        saveSettingsDebounced();
+        if (this.value) {
+            toastr.success('OpenRouter API key saved');
+        }
     });
 }
 
