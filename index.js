@@ -716,11 +716,17 @@ function setupFetchInterceptor() {
             if (options?.body) {
                 const body = JSON.parse(options.body);
                 isStreaming = body.stream === true;
-                requestMessages = body.messages || null;
+                // SillyTavern may nest messages in different places
+                requestMessages = body.messages || body.prompt?.messages || null;
+                log('Request body keys:', Object.keys(body));
                 log('Request streaming:', isStreaming, 'Messages:', requestMessages?.length || 0);
+                if (requestMessages && requestMessages.length > 0) {
+                    log('First message role:', requestMessages[0]?.role);
+                    log('Last message role:', requestMessages[requestMessages.length - 1]?.role);
+                }
             }
         } catch (e) {
-            log('Could not parse request body');
+            log('Could not parse request body:', e.message);
         }
 
         currentRequest.active = true;
