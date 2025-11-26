@@ -251,6 +251,226 @@ function findDivergencePoint(prevHashes, currHashes) {
 }
 
 /**
+ * Detect patterns in content that suggest specific issues
+ */
+function detectContentPatterns(content) {
+    const patterns = {
+        hasLoreEntries: false,
+        loreEntryNames: [],
+        hasDepthMarkers: false,
+        depthValues: [],
+        hasSystemPrompt: false,
+        hasChatHistory: false,
+        hasCharacterCard: false,
+        hasPersona: false,
+    };
+
+    if (!content) return patterns;
+
+    // Detect lorebook entries (common SillyTavern format)
+    const loreEntryRegex = /<lore_entry\s+([^>]+)>/gi;
+    let match;
+    while ((match = loreEntryRegex.exec(content)) !== null) {
+        patterns.hasLoreEntries = true;
+        patterns.loreEntryNames.push(match[1].trim());
+    }
+
+    // Alternative lorebook formats
+    const altLoreRegex = /\[Lore:\s*([^\]]+)\]/gi;
+    while ((match = altLoreRegex.exec(content)) !== null) {
+        patterns.hasLoreEntries = true;
+        patterns.loreEntryNames.push(match[1].trim());
+    }
+
+    // Detect depth markers
+    const depthRegex = /depth[:\s=]+(\d+)/gi;
+    while ((match = depthRegex.exec(content)) !== null) {
+        patterns.hasDepthMarkers = true;
+        patterns.depthValues.push(parseInt(match[1]));
+    }
+
+    // Detect common prompt components
+    if (/system\s*prompt|you are|your role is/i.test(content)) {
+        patterns.hasSystemPrompt = true;
+    }
+    if (/\[character\]|\{\{char\}\}|<character>|character card/i.test(content)) {
+        patterns.hasCharacterCard = true;
+    }
+    if (/\[user\]|\{\{user\}\}|<user>|persona/i.test(content)) {
+        patterns.hasPersona = true;
+    }
+    if (/\[assistant\]|\[human\]|<msg>|<message>/i.test(content)) {
+        patterns.hasChatHistory = true;
+    }
+
+    return patterns;
+}
+
+/**
+ * Compare two arrays of lorebook entries to detect ordering issues
+ */
+function detectLoreOrderingIssues(prevEntries, currEntries) {
+    if (!prevEntries || !currEntries || prevEntries.length === 0 || currEntries.length === 0) {
+        return null;
+    }
+
+    // Check if same entries but different order
+    const prevSet = new Set(prevEntries);
+    const currSet = new Set(currEntries);
+
+    const sameEntries = prevEntries.length === currEntries.length &&
+        prevEntries.every(e => currSet.has(e));
+
+    if (sameEntries) {
+        // Same entries, check order
+        for (let i = 0; i < prevEntries.length; i++) {
+            if (prevEntries[i] !== currEntries[i]) {
+                return {
+                    type: 'reordering',
+                    message: `Lorebook entries reordered (${prevEntries[i]} ↔ ${currEntries[i]})`,
+                    recommendation: 'Fix lorebook entry ordering: Set unique "Order" values for each entry to ensure deterministic sorting.',
+                    details: {
+                        prevOrder: prevEntries.slice(0, 5),
+                        currOrder: currEntries.slice(0, 5),
+                    },
+                };
+            }
+        }
+    } else {
+        // Different entries triggered
+        const added = currEntries.filter(e => !prevSet.has(e));
+        const removed = prevEntries.filter(e => !currSet.has(e));
+
+        if (added.length > 0 || removed.length > 0) {
+            return {
+                type: 'different_entries',
+                message: `Different lorebook entries triggered`,
+                recommendation: 'If entries change due to keywords, this is expected. For stable caching, set frequently-used entries to "Constant" mode.',
+                details: {
+                    added,
+                    removed,
+                },
+            };
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Analyze divergence location to determine likely cause
+ */
+function analyzeDivergenceLocation(divergeIndex, totalMessages, prevContent, currContent, prevPatterns, currPatterns) {
+    const analysis = {
+        location: 'unknown',
+        likelyCause: null,
+        recommendation: null,
+        severity: 'medium', // low, medium, high
+    };
+
+    const positionRatio = divergeIndex / totalMessages;
+
+    // Early divergence (first 20% of messages) - likely system prompt or lorebook
+    if (positionRatio < 0.2 || divergeIndex < 3) {
+        analysis.location = 'early';
+
+        // Check for lorebook content
+        if (prevPatterns?.hasLoreEntries || currPatterns?.hasLoreEntries) {
+            const loreIssue = detectLoreOrderingIssues(
+                prevPatterns?.loreEntryNames || [],
+                currPatterns?.loreEntryNames || []
+            );
+            if (loreIssue) {
+                analysis.likelyCause = loreIssue.type === 'reordering' ? 'lorebook_ordering' : 'lorebook_keywords';
+                analysis.recommendation = loreIssue.recommendation;
+                analysis.details = loreIssue.details;
+                analysis.severity = loreIssue.type === 'reordering' ? 'high' : 'medium';
+                return analysis;
+            }
+        }
+
+        // Check for depth-related issues
+        if (prevPatterns?.hasDepthMarkers || currPatterns?.hasDepthMarkers) {
+            analysis.likelyCause = 'depth_configuration';
+            analysis.recommendation = 'Check preset depth settings. Entries with depth > 0 are inserted relative to chat history, causing instability. Set constant entries to depth 0.';
+            analysis.severity = 'high';
+            return analysis;
+        }
+
+        // Generic early divergence
+        analysis.likelyCause = 'system_prompt_change';
+        analysis.recommendation = 'Early prompt content changed. Check: system prompt, character card, or author\'s notes injected at top.';
+        analysis.severity = 'medium';
+    }
+    // Middle divergence (20-80%) - likely injected content or author's notes
+    else if (positionRatio < 0.8) {
+        analysis.location = 'middle';
+
+        if (prevPatterns?.hasLoreEntries || currPatterns?.hasLoreEntries) {
+            analysis.likelyCause = 'lorebook_depth_injection';
+            analysis.recommendation = 'Lorebook entries injected at non-zero depth cause instability. Set all constant entries to depth 0 for better caching.';
+            analysis.severity = 'high';
+        } else {
+            analysis.likelyCause = 'injected_content';
+            analysis.recommendation = 'Content injected mid-prompt (author\'s notes, world info, etc.). Check depth settings in your preset.';
+            analysis.severity = 'medium';
+        }
+    }
+    // Late divergence (last 20%) - likely chat history or user input
+    else {
+        analysis.location = 'late';
+        analysis.likelyCause = 'chat_history';
+        analysis.recommendation = 'Change is in recent chat history - this is expected behavior.';
+        analysis.severity = 'low';
+    }
+
+    return analysis;
+}
+
+/**
+ * Generate smart recommendations based on analysis
+ */
+function generateSmartRecommendations(analysis) {
+    const recommendations = [];
+
+    // Priority 1: Specific diagnosed issues
+    if (analysis.locationAnalysis?.recommendation) {
+        recommendations.push({
+            priority: 1,
+            type: analysis.locationAnalysis.likelyCause,
+            message: analysis.locationAnalysis.recommendation,
+            severity: analysis.locationAnalysis.severity,
+        });
+    }
+
+    // Priority 2: TTL warnings
+    if (analysis.ttlWarning) {
+        recommendations.push({
+            priority: 2,
+            type: 'ttl_expired',
+            message: 'Cache expired due to 5-minute TTL. Send messages more frequently to maintain cache.',
+            severity: 'medium',
+        });
+    }
+
+    // Priority 3: Lorebook-specific issues
+    if (analysis.loreIssue) {
+        recommendations.push({
+            priority: 1,
+            type: analysis.loreIssue.type,
+            message: analysis.loreIssue.message,
+            severity: analysis.loreIssue.type === 'reordering' ? 'high' : 'medium',
+            actionable: analysis.loreIssue.recommendation,
+        });
+    }
+
+    // Sort by priority
+    recommendations.sort((a, b) => a.priority - b.priority);
+
+    return recommendations;
+}
+
+/**
  * Analyze why cache missed
  */
 function analyzeCacheMiss(currentMessages, currentHashes) {
@@ -259,6 +479,10 @@ function analyzeCacheMiss(currentMessages, currentHashes) {
         divergence: null,
         ttlWarning: false,
         timeSinceLastRequest: null,
+        locationAnalysis: null,
+        loreIssue: null,
+        recommendations: [],
+        primaryDiagnosis: null,
     };
 
     // Check TTL (5 minutes = 300000ms)
@@ -280,6 +504,85 @@ function analyzeCacheMiss(currentMessages, currentHashes) {
 
         if (divergence.divergeIndex >= 0) {
             analysis.reasons.push(divergence.reason);
+
+            // Analyze the divergent content for patterns
+            const prevContent = divergence.prevContent || '';
+            const currContent = divergence.currContent || '';
+            const prevPatterns = detectContentPatterns(prevContent);
+            const currPatterns = detectContentPatterns(currContent);
+
+            // Store patterns for detailed analysis
+            analysis.prevPatterns = prevPatterns;
+            analysis.currPatterns = currPatterns;
+
+            // Check for lorebook ordering issues specifically
+            if (prevPatterns.hasLoreEntries || currPatterns.hasLoreEntries) {
+                analysis.loreIssue = detectLoreOrderingIssues(
+                    prevPatterns.loreEntryNames,
+                    currPatterns.loreEntryNames
+                );
+            }
+
+            // Analyze divergence location
+            analysis.locationAnalysis = analyzeDivergenceLocation(
+                divergence.divergeIndex,
+                currentHashes.length,
+                prevContent,
+                currContent,
+                prevPatterns,
+                currPatterns
+            );
+
+            // Set primary diagnosis based on analysis
+            if (analysis.loreIssue?.type === 'reordering') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Lorebook Ordering Issue',
+                    icon: '📚',
+                    color: '#f87171',
+                    shortMessage: 'Lorebook entries are reordering between requests',
+                    action: 'Set unique Order values for each lorebook entry',
+                };
+            } else if (analysis.loreIssue?.type === 'different_entries') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Different Lorebook Entries',
+                    icon: '📖',
+                    color: '#fbbf24',
+                    shortMessage: 'Different lorebook entries triggered by keywords',
+                    action: 'Set frequently-used entries to Constant mode',
+                };
+            } else if (analysis.locationAnalysis?.likelyCause === 'depth_configuration') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Depth Configuration Issue',
+                    icon: '⬇️',
+                    color: '#f87171',
+                    shortMessage: 'Content at non-zero depth causing instability',
+                    action: 'Set constant entries to depth 0 in lorebook settings',
+                };
+            } else if (analysis.locationAnalysis?.likelyCause === 'lorebook_depth_injection') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Lorebook Depth Issue',
+                    icon: '📍',
+                    color: '#f87171',
+                    shortMessage: 'Lorebook injected mid-prompt at non-zero depth',
+                    action: 'Set lorebook entries to depth 0 and position "@ Depth"',
+                };
+            } else if (analysis.locationAnalysis?.location === 'late') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Chat History Change',
+                    icon: '💬',
+                    color: '#4ade80',
+                    shortMessage: 'Normal - new messages added to history',
+                    action: null, // No action needed
+                };
+            } else if (analysis.locationAnalysis?.location === 'early') {
+                analysis.primaryDiagnosis = {
+                    issue: 'Early Prompt Instability',
+                    icon: '⚠️',
+                    color: '#fbbf24',
+                    shortMessage: 'System prompt or early content changed',
+                    action: 'Check character card, system prompt, and author\'s notes',
+                };
+            }
         }
     }
 
@@ -293,6 +596,9 @@ function analyzeCacheMiss(currentMessages, currentHashes) {
             }
         }
     }
+
+    // Generate smart recommendations
+    analysis.recommendations = generateSmartRecommendations(analysis);
 
     return analysis;
 }
@@ -757,9 +1063,21 @@ function showAnalysisDetail(entry, index) {
             </div>
         `;
     } else if (a) {
+        // Show primary diagnosis prominently if available
+        if (a.primaryDiagnosis) {
+            const pd = a.primaryDiagnosis;
+            detailHtml += `
+                <div class="analysis_section ${pd.action ? 'warning' : 'success'}" style="border-left-color: ${pd.color}">
+                    <h4>${pd.icon} ${pd.issue}</h4>
+                    <p>${pd.shortMessage}</p>
+                    ${pd.action ? `<p style="margin-top: 10px;"><strong>Recommended Action:</strong> ${pd.action}</p>` : ''}
+                </div>
+            `;
+        }
+
         detailHtml += `
             <div class="analysis_section warning">
-                <h4>⚠ Cache Miss - Why?</h4>
+                <h4>⚠ Cache Miss Details</h4>
                 <ul class="analysis_reasons">
                     ${a.reasons.map(r => `<li>${r}</li>`).join('')}
                 </ul>
@@ -786,6 +1104,40 @@ function showAnalysisDetail(entry, index) {
                             </div>
                         </div>
                     ` : ''}
+                </div>
+            `;
+        }
+
+        // Show lorebook-specific analysis if detected
+        if (a.loreIssue) {
+            const lore = a.loreIssue;
+            detailHtml += `
+                <div class="analysis_section" style="border-left: 3px solid ${lore.type === 'reordering' ? '#f87171' : '#fbbf24'}">
+                    <h4>📚 Lorebook Analysis</h4>
+                    <p><strong>Issue:</strong> ${lore.message}</p>
+                    <p><strong>Fix:</strong> ${lore.recommendation}</p>
+                    ${lore.details ? `
+                        <div style="margin-top: 10px; font-size: 12px;">
+                            ${lore.details.prevOrder ? `<p><span style="color: #f87171;">Previous order:</span> ${lore.details.prevOrder.join(' → ')}</p>` : ''}
+                            ${lore.details.currOrder ? `<p><span style="color: #4ade80;">Current order:</span> ${lore.details.currOrder.join(' → ')}</p>` : ''}
+                            ${lore.details.added?.length > 0 ? `<p><span style="color: #4ade80;">Added:</span> ${lore.details.added.join(', ')}</p>` : ''}
+                            ${lore.details.removed?.length > 0 ? `<p><span style="color: #f87171;">Removed:</span> ${lore.details.removed.join(', ')}</p>` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        // Show location analysis
+        if (a.locationAnalysis) {
+            const loc = a.locationAnalysis;
+            const locColors = { early: '#f87171', middle: '#fbbf24', late: '#4ade80' };
+            detailHtml += `
+                <div class="analysis_section">
+                    <h4>📍 Divergence Location</h4>
+                    <p>Location: <span style="color: ${locColors[loc.location] || '#ccc'}">${loc.location.toUpperCase()}</span> in prompt</p>
+                    <p>Likely cause: ${loc.likelyCause?.replace(/_/g, ' ') || 'Unknown'}</p>
+                    <p>Severity: <span class="${loc.severity}">${loc.severity.toUpperCase()}</span></p>
                 </div>
             `;
         }
@@ -1059,17 +1411,23 @@ function updatePanel() {
 
     panel.style.display = 'block';
 
-    const totalWithCache = sessionStats.cacheHits + sessionStats.cacheMisses;
-    const hitRate = totalWithCache > 0
-        ? Math.round((sessionStats.cacheHits / totalWithCache) * 100)
-        : 0;
-
     const cacheReadTokens = sessionStats.totalCacheReadTokens;
     const cacheWriteTokens = sessionStats.totalCacheWriteTokens;
+    const reportedInputTokens = sessionStats.totalInputTokens;
+
+    // Total input = max of reported input_tokens OR (cache_read + cache_write)
+    // This handles cases where input_tokens is incorrectly reported (e.g., streaming)
+    const totalInputTokens = Math.max(reportedInputTokens, cacheReadTokens + cacheWriteTokens);
+
+    // Token-based hit rate: what % of input tokens came from cache
+    const hitRate = totalInputTokens > 0
+        ? Math.round((cacheReadTokens / totalInputTokens) * 100)
+        : 0;
+
     const savingsTokens = Math.round(cacheReadTokens * 0.9 - cacheWriteTokens * 0.25);
 
     document.getElementById('cache_total_requests').textContent = sessionStats.totalRequests;
-    document.getElementById('cache_hit_rate').textContent = totalWithCache > 0 ? `${hitRate}%` : '--';
+    document.getElementById('cache_hit_rate').textContent = totalInputTokens > 0 ? `${hitRate}%` : '--';
     document.getElementById('cache_read_tokens').textContent = cacheReadTokens.toLocaleString();
     document.getElementById('cache_write_tokens').textContent = cacheWriteTokens.toLocaleString();
     document.getElementById('cache_savings').textContent = savingsTokens > 0 ? `+${savingsTokens.toLocaleString()}` : savingsTokens.toLocaleString();
@@ -1078,7 +1436,7 @@ function updatePanel() {
     hitRateEl.className = 'cache_stat_value';
     if (hitRate >= 70) hitRateEl.classList.add('good');
     else if (hitRate >= 40) hitRateEl.classList.add('neutral');
-    else if (totalWithCache > 0) hitRateEl.classList.add('bad');
+    else if (totalInputTokens > 0) hitRateEl.classList.add('bad');
 
     const savingsEl = document.getElementById('cache_savings');
     savingsEl.className = 'cache_stat_value';
@@ -1088,30 +1446,101 @@ function updatePanel() {
     document.getElementById('cache_efficiency_fill').style.width = `${hitRate}%`;
 
     const recEl = document.getElementById('cache_recommendation');
+    // Check if last request had a good cache hit
+    const lastHadGoodHit = sessionStats.lastUsage?.cache_read_input_tokens > 1000;
+    const lastHadMiss = sessionStats.lastUsage &&
+        sessionStats.lastUsage.cache_read_input_tokens === 0 &&
+        sessionStats.lastUsage.cache_creation_input_tokens > 0;
+
+    // Get the last request's analysis for smart recommendations
+    const lastRequest = sessionStats.requestHistory[sessionStats.requestHistory.length - 1];
+    const lastAnalysis = lastRequest?.analysis;
+    const primaryDiagnosis = lastAnalysis?.primaryDiagnosis;
+
     if (!detectedClaudeUsage && sessionStats.totalRequests === 0) {
         recEl.textContent = 'Waiting for Claude requests...';
         recEl.style.color = '';
     } else if (sessionStats.consecutiveMisses >= settings.wasteThreshold) {
-        recEl.textContent = `Warning: ${sessionStats.consecutiveMisses} consecutive misses`;
-        recEl.style.color = '#f87171';
-    } else if (hitRate >= 70 && totalWithCache > 2) {
+        // Show smart diagnosis if available for consecutive misses
+        if (primaryDiagnosis && primaryDiagnosis.action) {
+            recEl.innerHTML = `<span style="color: ${primaryDiagnosis.color}">${primaryDiagnosis.icon} ${primaryDiagnosis.issue}</span><br><small>${primaryDiagnosis.action}</small>`;
+            recEl.style.color = '';
+        } else {
+            recEl.textContent = `Warning: ${sessionStats.consecutiveMisses} consecutive misses`;
+            recEl.style.color = '#f87171';
+        }
+    } else if (lastHadGoodHit) {
+        // Prioritize showing current request status
+        const readTokens = sessionStats.lastUsage.cache_read_input_tokens.toLocaleString();
+        recEl.textContent = `Cache hit! ${readTokens} tokens from cache`;
+        recEl.style.color = '#4ade80';
+    } else if (lastHadMiss && primaryDiagnosis) {
+        // Show smart diagnosis for cache miss
+        if (primaryDiagnosis.action) {
+            recEl.innerHTML = `<span style="color: ${primaryDiagnosis.color}">${primaryDiagnosis.icon} ${primaryDiagnosis.shortMessage}</span>`;
+        } else {
+            recEl.innerHTML = `<span style="color: ${primaryDiagnosis.color}">${primaryDiagnosis.icon} ${primaryDiagnosis.shortMessage}</span>`;
+        }
+        recEl.style.color = '';
+    } else if (lastHadMiss) {
+        recEl.textContent = `Cache miss - new content written`;
+        recEl.style.color = '#fbbf24';
+    } else if (hitRate >= 70 && sessionStats.totalRequests > 2) {
         recEl.textContent = 'Excellent cache efficiency';
         recEl.style.color = '#4ade80';
-    } else if (totalWithCache < 2) {
+    } else if (sessionStats.totalRequests < 2) {
         recEl.textContent = 'Gathering data...';
         recEl.style.color = '';
     } else if (cacheWriteTokens > 0 && cacheReadTokens === 0) {
         recEl.textContent = 'Only cache writes - no hits yet';
         recEl.style.color = '#fbbf24';
     } else {
-        recEl.textContent = 'Low efficiency - check prompt stability';
-        recEl.style.color = '#fbbf24';
+        // Show token-based stats
+        recEl.textContent = `${cacheReadTokens.toLocaleString()} tokens from cache (${hitRate}%)`;
+        recEl.style.color = hitRate >= 40 ? '#fbbf24' : '#f87171';
     }
 
     if (sessionStats.lastUsage) {
         const u = sessionStats.lastUsage;
         document.getElementById('cache_last_usage').textContent =
             `In: ${u.input_tokens} | Read: ${u.cache_read_input_tokens} | Write: ${u.cache_creation_input_tokens}`;
+    }
+
+    // Update TTL timer
+    updateTTLTimer();
+}
+
+/**
+ * Update the TTL countdown timer
+ */
+function updateTTLTimer() {
+    const ttlEl = document.getElementById('cache_ttl_timer');
+    if (!ttlEl) return;
+
+    if (!previousRequest.timestamp) {
+        ttlEl.textContent = 'TTL: No cache yet';
+        ttlEl.style.color = '';
+        return;
+    }
+
+    const elapsed = Date.now() - previousRequest.timestamp;
+    const remaining = Math.max(0, 300000 - elapsed); // 5 min = 300000ms
+    const remainingSec = Math.floor(remaining / 1000);
+    const min = Math.floor(remainingSec / 60);
+    const sec = remainingSec % 60;
+
+    if (remaining <= 0) {
+        ttlEl.textContent = 'TTL: EXPIRED';
+        ttlEl.style.color = '#f87171';
+    } else if (remaining < 60000) {
+        ttlEl.textContent = `TTL: ${sec}s`;
+        ttlEl.style.color = '#f87171';
+    } else if (remaining < 120000) {
+        ttlEl.textContent = `TTL: ${min}:${sec.toString().padStart(2, '0')}`;
+        ttlEl.style.color = '#fbbf24';
+    } else {
+        ttlEl.textContent = `TTL: ${min}:${sec.toString().padStart(2, '0')}`;
+        ttlEl.style.color = '#4ade80';
     }
 }
 
@@ -1157,6 +1586,7 @@ function createPanel() {
                 <div id="cache_efficiency_fill" style="width: 0%"></div>
             </div>
             <div id="cache_last_usage" style="font-size: 10px; opacity: 0.7; margin-top: 4px;">--</div>
+            <div id="cache_ttl_timer" style="font-size: 11px; margin-top: 4px;">TTL: --</div>
             <div id="cache_recommendation">Waiting for requests...</div>
             <div class="cache_btn_row">
                 <button id="cache_show_history" class="cache_action_btn">View History</button>
@@ -1278,5 +1708,9 @@ jQuery(async () => {
     await addSettingsUI();
     createPanel();
     setupFetchInterceptor();
+
+    // Update TTL timer every second
+    setInterval(updateTTLTimer, 1000);
+
     log('Extension loaded! Open browser console to see debug output.');
 });
