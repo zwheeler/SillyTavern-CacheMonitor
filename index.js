@@ -794,24 +794,48 @@ function processUsageData(usage) {
 }
 
 /**
- * Calculate costs for a request based on Claude pricing
- * Prices per 1M tokens (Sonnet 4.5): Input $3, Output $15, Cache Write $3.75, Cache Read $0.30
+ * Calculate costs for a request based on Claude pricing (Nov 2025)
+ * https://claude.com/pricing#api
  */
 function calculateCosts(usage) {
     const model = usage.model || '';
 
-    // Default to Sonnet pricing, adjust for other models
-    let inputPrice = 3.0;    // per 1M tokens
+    // Default to Sonnet 4.5 pricing, adjust for other models
+    let inputPrice = 3.0;       // per 1M tokens
     let outputPrice = 15.0;
-    let cacheWritePrice = 3.75;  // 25% more than input
-    let cacheReadPrice = 0.30;   // 90% less than input
+    let cacheWritePrice = 3.75; // 25% more than input
+    let cacheReadPrice = 0.30;  // 90% less than input
 
-    if (/opus/i.test(model)) {
+    // Opus 4.5 pricing
+    if (/opus-4-5|opus-4\.5/i.test(model)) {
+        inputPrice = 5.0;
+        outputPrice = 25.0;
+        cacheWritePrice = 6.25;
+        cacheReadPrice = 0.50;
+    }
+    // Opus 4.1 (legacy) pricing
+    else if (/opus-4-1|opus-4\.1/i.test(model)) {
         inputPrice = 15.0;
         outputPrice = 75.0;
         cacheWritePrice = 18.75;
         cacheReadPrice = 1.50;
-    } else if (/haiku/i.test(model)) {
+    }
+    // Generic opus fallback (assume 4.5)
+    else if (/opus/i.test(model)) {
+        inputPrice = 5.0;
+        outputPrice = 25.0;
+        cacheWritePrice = 6.25;
+        cacheReadPrice = 0.50;
+    }
+    // Haiku 4.5 pricing
+    else if (/haiku-4-5|haiku-4\.5/i.test(model)) {
+        inputPrice = 1.0;
+        outputPrice = 5.0;
+        cacheWritePrice = 1.25;
+        cacheReadPrice = 0.10;
+    }
+    // Haiku 3.5 (legacy) pricing
+    else if (/haiku/i.test(model)) {
         inputPrice = 0.80;
         outputPrice = 4.0;
         cacheWritePrice = 1.0;
