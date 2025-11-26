@@ -842,13 +842,17 @@ function calculateCosts(usage) {
         cacheReadPrice = 0.08;
     }
 
-    const inputTokens = usage.input_tokens || 0;
+    const reportedInputTokens = usage.input_tokens || 0;
     const outputTokens = usage.output_tokens || 0;
     const cacheRead = usage.cache_read_input_tokens || 0;
     const cacheWrite = usage.cache_creation_input_tokens || 0;
 
+    // True total input tokens = max of reported OR (cache_read + cache_write)
+    // This handles cases where input_tokens is incorrectly reported (e.g., streaming shows 2)
+    const totalInputTokens = Math.max(reportedInputTokens, cacheRead + cacheWrite);
+
     // Non-cached input tokens = total input - cache read
-    const nonCachedInput = Math.max(0, inputTokens - cacheRead);
+    const nonCachedInput = Math.max(0, totalInputTokens - cacheRead);
 
     const inputCost = (nonCachedInput / 1_000_000) * inputPrice;
     const outputCost = (outputTokens / 1_000_000) * outputPrice;
@@ -857,8 +861,8 @@ function calculateCosts(usage) {
 
     const totalCost = inputCost + outputCost + cacheWriteCost + cacheReadCost;
 
-    // What it would have cost without caching
-    const costWithoutCache = ((inputTokens / 1_000_000) * inputPrice) + outputCost;
+    // What it would have cost without caching (all input at full price)
+    const costWithoutCache = ((totalInputTokens / 1_000_000) * inputPrice) + outputCost;
     const savings = costWithoutCache - totalCost;
 
     return {
